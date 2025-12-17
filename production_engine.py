@@ -173,14 +173,63 @@ class ExecutionEngine:
             "positions": self.positions
         }))
 
+class FeedbackLoop:
+    """
+    Stores predictions and checks later if they were correct to update the model.
+    This enables 'Online Learning' in a live environment.
+    """
+    def __init__(self, validation_window_seconds: int = 300):
+        self.pending_predictions = [] # List of (timestamp, features, predicted_signal, entry_price)
+        self.validation_window = validation_window_seconds
+
+    def record_prediction(self, features: dict, signal: str, price: float):
+        self.pending_predictions.append({
+            "timestamp": datetime.now(),
+            "features": features,
+            "signal": signal,
+            "entry_price": price
+        })
+
+    def check_outcomes(self, current_price: float) -> List[Dict]:
+        """
+        Returns a list of completed learning examples: {'features': ..., 'label': ...}
+        """
+        ready_to_learn = []
+        remaining = []
+        
+        cutoff_time = datetime.now() - timedelta(seconds=self.validation_window)
+        
+        for pred in self.pending_predictions:
+            if pred['timestamp'] < cutoff_time:
+                # Time to validate!
+                # Label logic: 1 if profitable, 0 if not
+                is_profitable = False
+                if pred['signal'] == "BUY":
+                    is_profitable = current_price > pred['entry_price']
+                elif pred['signal'] == "SELL":
+                    is_profitable = current_price < pred['entry_price']
+                
+                label = 1 if is_profitable else 0
+                ready_to_learn.append({"features": pred['features'], "label": label})
+                
+                logger.info(json.dumps({
+                    "event": "LEARNING_UPDATE", 
+                    "signal": pred['signal'], 
+                    "entry": pred['entry_price'], 
+                    "exit": current_price,
+                    "label": label
+                }))
+            else:
+                remaining.append(pred)
+                
+        self.pending_predictions = remaining
+        return ready_to_learn
+
 class StrategyEngine:
     """
     Holds the AI models.
     """
     def __init__(self):
-        # We would import the actual models here
-        # For demonstration, we'll keep it lightweight or mock the import if needed
-        # to ensure this script runs standalone for the user to test.
         from transformers import pipeline
         from river import compose, linear_model, preprocessing
         
@@ -213,6 +262,7 @@ class RealTimeCore:
         self.ingestion = AsyncDataIngestion(self.queue)
         self.execution = ExecutionEngine()
         self.strategy = None
+        self.feedback = FeedbackLoop(validation_window_seconds=60) # Short window for demo
         self.running = False
 
     async def run(self):
@@ -259,9 +309,20 @@ class RealTimeCore:
                 
             elif event.type == "PRICE":
                 current_price = event.data['price']
+                
+                # 1. Check if we can learn from past trades
+                learning_batch = self.feedback.check_outcomes(current_price)
+                for example in learning_batch:
+                    self.strategy.learn(example['features'], example['label'])
+                
+                # 2. Make new prediction
                 signal, conf = self.strategy.predict(self.strategy.latest_sentiment)
                 
                 if signal != "HOLD":
+                    # Record this prediction so we can learn from it later
+                    features = {'sentiment': self.strategy.latest_sentiment}
+                    self.feedback.record_prediction(features, signal, current_price)
+                    
                     await self.execution.execute_order(signal, conf, current_price)
             
             self.queue.task_done()

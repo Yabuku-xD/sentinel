@@ -8,3 +8,4 @@ yfinance
 plotly
 torch
 transformers
+aiohttp

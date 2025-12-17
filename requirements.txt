@@ -8,8 +8,4 @@ yfinance
 plotly
 torch
 transformers
-<<<<<<< Current (Your changes)
 aiohttp
-=======
-aiohttp
->>>>>>> Incoming (Background Agent changes)

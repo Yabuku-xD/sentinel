@@ -1,0 +1,10 @@
+pandas
+vaderSentiment
+streamlit
+matplotlib
+river
+feedparser
+yfinance
+plotly
+torch
+transformers

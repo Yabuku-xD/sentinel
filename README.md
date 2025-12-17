@@ -1,5 +1,7 @@
 # Sentinel - Algorithmic Trading System (Hybrid AI)
 
+![Sentinel Dashboard](main.png)
+
 See, I’ve been where you are.
 
 You spend a whole weekend fueled by coffee and optimism, coding up a trading bot. You backtest it, and—oh my god—it’s a money printer. The equity curve goes straight up to the right. You start mentally picking out colors for your future Porsche.

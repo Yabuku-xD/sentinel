@@ -131,8 +131,8 @@ class LiveIngestion(DataIngestionBase):
                 data={"symbol": "^DJI", "price": price}
             ))
         except Exception as e:
-             logger.error(json.dumps({"event": "FETCH_ERROR", "source": "price", "error": str(e)}))
-             self.price_circuit.record_failure()
+            logger.error(json.dumps({"event": "FETCH_ERROR", "source": "price", "error": str(e)}))
+            self.price_circuit.record_failure()
 
     async def ingest_loop(self):
         while True:
@@ -190,10 +190,20 @@ class ReplayIngestion(DataIngestionBase):
 
 class ExecutionEngine:
     def __init__(self):
-        self.positions = {}
-        self.balance = Config.INITIAL_CAPITAL
-        self.risk_manager = RiskManager(self.balance)
         self.db = Database(Config.DB_PATH)
+        self.balance = self.db.get_latest_balance()
+        # Load open positions from DB for persistence
+        self.positions = {} 
+        for pos in self.db.get_positions():
+            # pos is a Row object or dict depending on factory
+            self.positions[pos['symbol']] = {
+                'symbol': pos['symbol'],
+                'quantity': pos['quantity'],
+                'entry_price': pos['entry_price'],
+                'stop_loss': pos['stop_loss'],
+                'take_profit': pos['take_profit']
+            }
+        self.risk_manager = RiskManager(self.balance)
 
     async def execute_order(self, signal: str, confidence: float, price: float):
         decision = self.risk_manager.validate_signal(signal, confidence, price, self.balance)
@@ -218,13 +228,37 @@ class ExecutionEngine:
         await asyncio.sleep(0.1)
         
         cost = decision.size * price
+        symbol = "^DJI" # Default for this system
         
         if decision.signal == "BUY":
+            if self.balance < cost: return
+            
             self.balance -= cost
-            self.positions["^DJI"] = self.positions.get("^DJI", 0) + decision.size
+            
+            # Calculate new average entry if position exists
+            current_pos = self.positions.get(symbol, {'quantity': 0, 'entry_price': 0.0})
+            current_qty = current_pos['quantity']
+            current_avg = current_pos['entry_price']
+            
+            new_qty = current_qty + decision.size
+            if new_qty > 0:
+                new_avg = ((current_avg * current_qty) + cost) / new_qty
+            else:
+                new_avg = price
+                
+            self.positions[symbol] = {
+                'symbol': symbol,
+                'quantity': new_qty,
+                'entry_price': new_avg,
+                'stop_loss': decision.stop_loss,
+                'take_profit': decision.take_profit
+            }
+            
+            self.db.add_position(symbol, new_qty, new_avg, decision.stop_loss, decision.take_profit)
+            
         elif decision.signal == "SELL":
-            self.balance += cost 
-            self.positions["^DJI"] = self.positions.get("^DJI", 0) - decision.size
+            # Treat SELL as closing the position
+            await self.close_position(symbol, price, "SIGNAL_SELL")
             
         logger.info(json.dumps({
             "event": "ORDER_FILLED", 
@@ -232,12 +266,51 @@ class ExecutionEngine:
             "positions": self.positions
         }))
 
+    async def monitor_risk(self, current_price: float):
+        """Checks all open positions against Stop Loss and Take Profit levels."""
+        to_close = []
+        for symbol, pos in self.positions.items():
+            if pos['quantity'] > 0:
+                if current_price <= pos['stop_loss']:
+                    to_close.append((symbol, "STOP_LOSS"))
+                elif current_price >= pos['take_profit']:
+                    to_close.append((symbol, "TAKE_PROFIT"))
+        
+        for symbol, reason in to_close:
+            await self.close_position(symbol, current_price, reason)
+
+    async def close_position(self, symbol: str, price: float, reason: str):
+        pos = self.positions.get(symbol)
+        if not pos: return
+        
+        qty = pos['quantity']
+        if qty == 0: return
+
+        revenue = qty * price
+        self.balance += revenue
+        
+        pnl = revenue - (pos['entry_price'] * qty)
+        
+        # Log to DB using new signature
+        self.db.log_trade(reason, symbol, qty, pos['entry_price'], price, pnl)
+        self.db.remove_position(symbol)
+        
+        del self.positions[symbol]
+        
+        logger.info(json.dumps({
+            "event": "POSITION_CLOSED", 
+            "symbol": symbol, 
+            "reason": reason, 
+            "pnl": pnl,
+            "final_balance": self.balance
+        }))
+
     def log_completed_trade(self, signal: str, label: int):
-        try:
-            new_bal = self.db.log_trade(signal, label)
-            self.balance = new_bal 
-        except Exception as e:
-            logger.error(f"Failed to log trade: {e}")
+        # Deprecated: The system now logs trades on close_position.
+        # Keeping for compatibility with FeedbackLoop if needed, but FeedbackLoop calls this.
+        # FeedbackLoop tracks *predictions*, not necessarily *executed trades* (pnl).
+        # We can leave this empty or update it to just log prediction accuracy.
+        pass
 
 class FeedbackLoop:
     def __init__(self, execution_engine: ExecutionEngine, validation_window_seconds: int = 300):
@@ -281,7 +354,7 @@ class FeedbackLoop:
                 self.execution.log_completed_trade(pred['signal'], label)
                 
                 logger.info(json.dumps({
-                    "event": "TRADE_CLOSED", 
+                    "event": "PREDICTION_VALIDATED", 
                     "signal": pred['signal'], 
                     "entry": pred['entry_price'], 
                     "exit": current_price,
@@ -368,6 +441,9 @@ class RealTimeCore:
                 
             elif event.type == "PRICE":
                 current_price = event.data['price']
+                
+                # Active Risk Check (Crucial for Real-Time)
+                await self.execution.monitor_risk(current_price)
                 
                 learning_batch = self.feedback.check_outcomes(current_price)
                 for example in learning_batch:

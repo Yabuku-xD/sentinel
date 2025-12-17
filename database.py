@@ -1,7 +1,9 @@
 import sqlite3
 import datetime
 import time
-import random
+import logging
+
+logger = logging.getLogger("Database")
 
 class Database:
     def __init__(self, db_path="portfolio.db"):
@@ -11,56 +13,86 @@ class Database:
     def init_db(self):
         conn = sqlite3.connect(self.db_path)
         c = conn.cursor()
+
         c.execute('''
             CREATE TABLE IF NOT EXISTS portfolio (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 timestamp TEXT,
                 balance REAL,
-                position_size INTEGER,
                 signal TEXT,
-                actual_movement INTEGER,
+                symbol TEXT,
+                quantity INTEGER,
+                entry_price REAL,
+                exit_price REAL,
                 pnl REAL
             )
         ''')
+
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS positions (
+                symbol TEXT PRIMARY KEY,
+                quantity INTEGER,
+                entry_price REAL,
+                stop_loss REAL,
+                take_profit REAL,
+                timestamp TEXT
+            )
+        ''')
+
         c.execute('SELECT count(*) FROM portfolio')
         if c.fetchone()[0] == 0:
             initial_balance = 10000.0
-            c.execute('INSERT INTO portfolio (timestamp, balance, position_size, signal, actual_movement, pnl) VALUES (?, ?, ?, ?, ?, ?)',
-                      (datetime.datetime.now().isoformat(), initial_balance, 0, 'INIT', 0, 0.0))
+            c.execute('''INSERT INTO portfolio 
+                (timestamp, balance, signal, symbol, quantity, entry_price, exit_price, pnl) 
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)''',
+                (datetime.datetime.now().isoformat(), initial_balance, 'INIT', 'CASH', 0, 0.0, 0.0, 0.0))
+        
         conn.commit()
         conn.close()
 
-    def log_trade(self, signal, actual_label, pnl_change=0):
+    def get_latest_balance(self):
+        with sqlite3.connect(self.db_path) as conn:
+            c = conn.cursor()
+            c.execute('SELECT balance FROM portfolio ORDER BY id DESC LIMIT 1')
+            row = c.fetchone()
+            return row[0] if row else 10000.0
+
+    def add_position(self, symbol, quantity, entry_price, stop_loss, take_profit):
+        with sqlite3.connect(self.db_path) as conn:
+            c = conn.cursor()
+            c.execute('''
+                INSERT OR REPLACE INTO positions (symbol, quantity, entry_price, stop_loss, take_profit, timestamp)
+                VALUES (?, ?, ?, ?, ?, ?)
+            ''', (symbol, quantity, entry_price, stop_loss, take_profit, datetime.datetime.now().isoformat()))
+            conn.commit()
+
+    def remove_position(self, symbol):
+        with sqlite3.connect(self.db_path) as conn:
+            c = conn.cursor()
+            c.execute('DELETE FROM positions WHERE symbol = ?', (symbol,))
+            conn.commit()
+
+    def get_positions(self):
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            c = conn.cursor()
+            c.execute('SELECT * FROM positions')
+            return [dict(row) for row in c.fetchall()]
+
+    def log_trade(self, signal, symbol, quantity, entry_price, exit_price, pnl):
         retries = 3
         while retries > 0:
             try:
                 conn = sqlite3.connect(self.db_path, timeout=10) 
                 c = conn.cursor()
                 
-                c.execute('SELECT balance, position_size FROM portfolio ORDER BY id DESC LIMIT 1')
-                last_row = c.fetchone()
-                current_balance = last_row[0] if last_row else 10000.0
+                current_balance = self.get_latest_balance()
+                new_balance = current_balance + pnl
                 
-                market_move_pct = random.uniform(0.005, 0.015) 
-                gross_profit = 10000.0 * market_move_pct 
-                
-                commission = 2.0 
-                
-                if signal == 'BUY':
-                    if actual_label == 1:
-                        profit = gross_profit - commission 
-                    else:
-                        profit = -gross_profit - commission 
-                elif signal == 'SELL':
-                    if actual_label == 0:
-                        profit = gross_profit - commission 
-                    else:
-                        profit = -gross_profit - commission 
-                
-                new_balance = current_balance + profit
-                
-                c.execute('INSERT INTO portfolio (timestamp, balance, position_size, signal, actual_movement, pnl) VALUES (?, ?, ?, ?, ?, ?)',
-                          (datetime.datetime.now().isoformat(), new_balance, 0, signal, actual_label, profit))
+                c.execute('''INSERT INTO portfolio 
+                    (timestamp, balance, signal, symbol, quantity, entry_price, exit_price, pnl) 
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)''',
+                    (datetime.datetime.now().isoformat(), new_balance, signal, symbol, quantity, entry_price, exit_price, pnl))
                 
                 conn.commit()
                 conn.close()
@@ -68,6 +100,6 @@ class Database:
             except sqlite3.OperationalError as e:
                 retries -= 1
                 if retries == 0:
-                    print(f"DB Error after retries: {e}")
+                    logger.error(f"DB Error after retries: {e}")
                     raise e
                 time.sleep(0.5)

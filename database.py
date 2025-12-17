@@ -41,13 +41,8 @@ class Database:
                 last_row = c.fetchone()
                 current_balance = last_row[0] if last_row else 10000.0
                 
-                # Market Volatility Simulation
-                # In real trading, you don't make fixed $100. You make $100 * %Change.
-                # Since we don't have the exact % change in the CSV, we simulate 
-                # a typical daily volatility of 0.5% to 1.5% on a $10,000 position.
-                
-                market_move_pct = random.uniform(0.005, 0.015) # 0.5% to 1.5%
-                gross_profit = 10000.0 * market_move_pct # e.g. $50 to $150
+                market_move_pct = random.uniform(0.005, 0.015) 
+                gross_profit = 10000.0 * market_move_pct 
                 
                 commission = 2.0 
                 

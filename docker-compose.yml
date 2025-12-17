@@ -1,20 +1,14 @@
 version: '3.8'
 
 services:
-  # Service 1: The Trading Engine (Backend)
   engine:
     build: .
     container_name: algo-engine
-    # MODE SELECTION:
-    # 1. Backtest (Simulation):
-    command: python replay_engine.py --mode replay
-    # 2. Live Trading (Real-Time Google News & Yahoo Finance):
-    # command: python replay_engine.py --mode live 
+    command: python production_engine.py --mode replay
     volumes:
-      - .:/app  # Mount current directory so DB is shared with host
+      - .:/app 
     tty: true
 
-  # Service 2: The Dashboard (Frontend)
   dashboard:
     build: .
     container_name: algo-dashboard
@@ -22,7 +16,6 @@ services:
     ports:
       - "8501:8501"
     volumes:
-      - .:/app  # Mount current directory so it sees the DB updates
+      - .:/app 
     depends_on:
       - engine
-

@@ -9,3 +9,7 @@ plotly
 torch
 transformers
 aiohttp
+tensorflow
+tf-keras
+pytest
+python-dotenv

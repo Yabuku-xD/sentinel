@@ -3,37 +3,38 @@ import aiohttp
 import logging
 import json
 import time
+import argparse
+import pandas as pd
+import numpy as np
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional, Any
 from dataclasses import dataclass
 import yfinance as yf
 import feedparser
 
-# Configure Structured Logging
+from config import Config
+from risk_manager import RiskManager
+from database import Database
+
 logging.basicConfig(
     level=logging.INFO,
     format='{"timestamp": "%(asctime)s", "level": "%(levelname)s", "module": "%(module)s", "message": "%(message)s"}'
 )
 logger = logging.getLogger("RealTimeEngine")
 
-# --- Architecture Components ---
-
 @dataclass
 class MarketEvent:
     timestamp: datetime
-    type: str # 'NEWS', 'PRICE', 'SYSTEM'
+    type: str 
     data: Dict[str, Any]
 
 class CircuitBreaker:
-    """
-    Prevents cascading failures when external APIs are down or slow.
-    """
     def __init__(self, failure_threshold: int = 3, recovery_timeout: int = 60):
         self.failure_threshold = failure_threshold
         self.recovery_timeout = recovery_timeout
         self.failures = 0
         self.last_failure_time = None
-        self.state = "CLOSED" # CLOSED (Normal), OPEN (Broken), HALF-OPEN (Testing)
+        self.state = "CLOSED" 
 
     def record_failure(self):
         self.failures += 1
@@ -58,14 +59,19 @@ class CircuitBreaker:
                 self.state = "HALF-OPEN"
                 return True
             return False
-        return True # HALF-OPEN
+        return True 
 
-class AsyncDataIngestion:
-    """
-    Handles concurrent fetching of data from multiple sources.
-    """
+class DataIngestionBase:
     def __init__(self, event_queue: asyncio.Queue):
         self.event_queue = event_queue
+    
+    async def start(self): pass
+    async def stop(self): pass
+    async def ingest_loop(self): pass
+
+class LiveIngestion(DataIngestionBase):
+    def __init__(self, event_queue: asyncio.Queue):
+        super().__init__(event_queue)
         self.session = None
         self.rss_circuit = CircuitBreaker()
         self.price_circuit = CircuitBreaker()
@@ -73,21 +79,18 @@ class AsyncDataIngestion:
 
     async def start(self):
         self.session = aiohttp.ClientSession()
-        logger.info(json.dumps({"event": "INGESTION_STARTED"}))
+        logger.info(json.dumps({"event": "INGESTION_STARTED", "mode": "LIVE"}))
 
     async def stop(self):
         if self.session:
             await self.session.close()
 
     async def fetch_news(self):
-        """Async fetch of RSS feed"""
         if not self.rss_circuit.can_request():
             return
 
         url = "https://news.google.com/rss/headlines/section/topic/BUSINESS"
         try:
-            # Note: feedparser is synchronous, in a real high-perf app we'd use an async XML parser
-            # or offload to a thread. For now, we simulate async fetch.
             async with self.session.get(url, timeout=10) as response:
                 if response.status == 200:
                     content = await response.text()
@@ -106,7 +109,6 @@ class AsyncDataIngestion:
                     
                     for event in new_events:
                         await self.event_queue.put(event)
-                        
                 else:
                     self.rss_circuit.record_failure()
         except Exception as e:
@@ -114,14 +116,10 @@ class AsyncDataIngestion:
             self.rss_circuit.record_failure()
 
     async def fetch_price(self):
-        """Async fetch of price data"""
-        # In a real app, this would use a websocket connection to Polygon/Alpaca
         if not self.price_circuit.can_request():
             return
 
         try:
-            # Simulating async non-blocking IO call
-            # yfinance is blocking, so we run it in an executor
             loop = asyncio.get_event_loop()
             ticker = await loop.run_in_executor(None, lambda: yf.Ticker("^DJI"))
             price = await loop.run_in_executor(None, lambda: ticker.fast_info['last_price'])
@@ -136,36 +134,97 @@ class AsyncDataIngestion:
              logger.error(json.dumps({"event": "FETCH_ERROR", "source": "price", "error": str(e)}))
              self.price_circuit.record_failure()
 
+    async def ingest_loop(self):
+        while True:
+            await asyncio.gather(
+                self.fetch_news(),
+                self.fetch_price()
+            )
+            await asyncio.sleep(60)
+
+class ReplayIngestion(DataIngestionBase):
+    def __init__(self, event_queue: asyncio.Queue, csv_path="Combined_News_DJIA.csv"):
+        super().__init__(event_queue)
+        self.csv_path = csv_path
+        self.df = pd.read_csv(self.csv_path)
+        logger.info(json.dumps({"event": "INGESTION_STARTED", "mode": "REPLAY", "days": len(self.df)}))
+
+    async def ingest_loop(self):
+        print(f"Starting replay of {len(self.df)} days...")
+        base_price = 10000.0
+        
+        for index, row in self.df.iterrows():
+            headlines = []
+            for i in range(1, 26):
+                col_name = f"Top{i}"
+                if pd.notna(row[col_name]):
+                    headlines.append(str(row[col_name]).strip())
+            
+            for title in headlines[:5]:
+                await self.event_queue.put(MarketEvent(
+                    timestamp=datetime.now(),
+                    type="NEWS",
+                    data={"title": title}
+                ))
+            
+            await self.event_queue.put(MarketEvent(
+                timestamp=datetime.now(),
+                type="PRICE",
+                data={"symbol": "^DJI", "price": base_price}
+            ))
+            
+            await asyncio.sleep(0.1)
+            
+            label = int(row["Label"])
+            move = base_price * 0.01 if label == 1 else -base_price * 0.01
+            new_price = base_price + move
+            
+            await self.event_queue.put(MarketEvent(
+                timestamp=datetime.now(),
+                type="PRICE",
+                data={"symbol": "^DJI", "price": new_price}
+            ))
+            
+            base_price = new_price
+            await asyncio.sleep(0.5) 
+
 class ExecutionEngine:
-    """
-    Abstraction layer for order execution.
-    Allows swapping 'Paper Trading' for 'Live Broker' easily.
-    """
     def __init__(self):
         self.positions = {}
-        self.balance = 10000.0
+        self.balance = Config.INITIAL_CAPITAL
+        self.risk_manager = RiskManager(self.balance)
+        self.db = Database(Config.DB_PATH)
 
     async def execute_order(self, signal: str, confidence: float, price: float):
-        """
-        Executes an order asynchronously.
-        """
+        decision = self.risk_manager.validate_signal(signal, confidence, price, self.balance)
+        
+        if not decision:
+            logger.info(json.dumps({
+                "event": "ORDER_REJECTED", 
+                "reason": "Risk Management", 
+                "signal": signal,
+                "confidence": confidence
+            }))
+            return
+
         logger.info(json.dumps({
             "event": "ORDER_SUBMITTED", 
-            "signal": signal, 
-            "confidence": confidence,
+            "signal": decision.signal, 
+            "size": decision.size,
+            "stop_loss": decision.stop_loss,
             "price": price
         }))
         
-        # Simulate network latency for execution
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(0.1)
         
-        # Simple execution logic
-        if signal == "BUY":
-            self.balance -= price
-            self.positions["^DJI"] = self.positions.get("^DJI", 0) + 1
-        elif signal == "SELL":
-            self.balance += price
-            self.positions["^DJI"] = self.positions.get("^DJI", 0) - 1
+        cost = decision.size * price
+        
+        if decision.signal == "BUY":
+            self.balance -= cost
+            self.positions["^DJI"] = self.positions.get("^DJI", 0) + decision.size
+        elif decision.signal == "SELL":
+            self.balance += cost 
+            self.positions["^DJI"] = self.positions.get("^DJI", 0) - decision.size
             
         logger.info(json.dumps({
             "event": "ORDER_FILLED", 
@@ -173,14 +232,18 @@ class ExecutionEngine:
             "positions": self.positions
         }))
 
+    def log_completed_trade(self, signal: str, label: int):
+        try:
+            new_bal = self.db.log_trade(signal, label)
+            self.balance = new_bal 
+        except Exception as e:
+            logger.error(f"Failed to log trade: {e}")
+
 class FeedbackLoop:
-    """
-    Stores predictions and checks later if they were correct to update the model.
-    This enables 'Online Learning' in a live environment.
-    """
-    def __init__(self, validation_window_seconds: int = 300):
-        self.pending_predictions = [] # List of (timestamp, features, predicted_signal, entry_price)
+    def __init__(self, execution_engine: ExecutionEngine, validation_window_seconds: int = 300):
+        self.pending_predictions = [] 
         self.validation_window = validation_window_seconds
+        self.execution = execution_engine
 
     def record_prediction(self, features: dict, signal: str, price: float):
         self.pending_predictions.append({
@@ -191,32 +254,38 @@ class FeedbackLoop:
         })
 
     def check_outcomes(self, current_price: float) -> List[Dict]:
-        """
-        Returns a list of completed learning examples: {'features': ..., 'label': ...}
-        """
         ready_to_learn = []
         remaining = []
         
-        cutoff_time = datetime.now() - timedelta(seconds=self.validation_window)
-        
         for pred in self.pending_predictions:
-            if pred['timestamp'] < cutoff_time:
-                # Time to validate!
-                # Label logic: 1 if profitable, 0 if not
-                is_profitable = False
+            price_change_pct = (current_price - pred['entry_price']) / pred['entry_price']
+            
+            resolved = False
+            label = None
+            
+            if abs(price_change_pct) > 0.005: 
+                resolved = True
                 if pred['signal'] == "BUY":
-                    is_profitable = current_price > pred['entry_price']
-                elif pred['signal'] == "SELL":
-                    is_profitable = current_price < pred['entry_price']
+                    label = 1 if current_price > pred['entry_price'] else 0
+                else: 
+                    label = 1 if current_price < pred['entry_price'] else 0
+            
+            time_diff = (datetime.now() - pred['timestamp']).total_seconds()
+            if time_diff > self.validation_window:
+                resolved = True
+                label = 0 
                 
-                label = 1 if is_profitable else 0
+            if resolved:
                 ready_to_learn.append({"features": pred['features'], "label": label})
                 
+                self.execution.log_completed_trade(pred['signal'], label)
+                
                 logger.info(json.dumps({
-                    "event": "LEARNING_UPDATE", 
+                    "event": "TRADE_CLOSED", 
                     "signal": pred['signal'], 
                     "entry": pred['entry_price'], 
                     "exit": current_price,
+                    "pnl_pct": price_change_pct,
                     "label": label
                 }))
             else:
@@ -226,9 +295,6 @@ class FeedbackLoop:
         return ready_to_learn
 
 class StrategyEngine:
-    """
-    Holds the AI models.
-    """
     def __init__(self):
         from transformers import pipeline
         from river import compose, linear_model, preprocessing
@@ -247,7 +313,6 @@ class StrategyEngine:
         return score
 
     def predict(self, sentiment_score: float) -> str:
-        # Simple logic for demo
         prob = self.learner.predict_proba_one({'sentiment': sentiment_score}).get(1, 0.5)
         if prob > 0.6: return "BUY", prob
         if prob < 0.4: return "SELL", prob
@@ -257,27 +322,33 @@ class StrategyEngine:
         self.learner.learn_one(features, label)
 
 class RealTimeCore:
-    def __init__(self):
+    def __init__(self, mode='replay'):
         self.queue = asyncio.Queue()
-        self.ingestion = AsyncDataIngestion(self.queue)
+        self.mode = mode
+        
+        if self.mode == 'live':
+            self.ingestion = LiveIngestion(self.queue)
+            self.validation_window = 300 
+        else:
+            self.ingestion = ReplayIngestion(self.queue)
+            self.validation_window = 2 
+            
         self.execution = ExecutionEngine()
         self.strategy = None
-        self.feedback = FeedbackLoop(validation_window_seconds=60) # Short window for demo
+        self.feedback = FeedbackLoop(self.execution, validation_window_seconds=self.validation_window)
         self.running = False
 
     async def run(self):
         self.running = True
         await self.ingestion.start()
         
-        # Load heavy models in executor to not block the loop
         loop = asyncio.get_event_loop()
         self.strategy = await loop.run_in_executor(None, StrategyEngine)
 
-        # Create background tasks
-        ingest_task = asyncio.create_task(self.ingest_loop())
+        ingest_task = asyncio.create_task(self.ingestion.ingest_loop())
         process_task = asyncio.create_task(self.process_loop())
         
-        logger.info("System Online. Waiting for events...")
+        logger.info(f"System Online ({self.mode.upper()}). Waiting for events...")
         
         try:
             await asyncio.gather(ingest_task, process_task)
@@ -286,19 +357,7 @@ class RealTimeCore:
         finally:
             await self.ingestion.stop()
 
-    async def ingest_loop(self):
-        """Loop to constantly fetch data based on intervals"""
-        while self.running:
-            # We can run these concurrently
-            await asyncio.gather(
-                self.ingestion.fetch_news(),
-                self.ingestion.fetch_price()
-            )
-            # Fetch rate limit / polling interval
-            await asyncio.sleep(5) 
-
     async def process_loop(self):
-        """Event Processing Loop"""
         while self.running:
             event = await self.queue.get()
             
@@ -310,17 +369,15 @@ class RealTimeCore:
             elif event.type == "PRICE":
                 current_price = event.data['price']
                 
-                # 1. Check if we can learn from past trades
                 learning_batch = self.feedback.check_outcomes(current_price)
                 for example in learning_batch:
                     self.strategy.learn(example['features'], example['label'])
                 
-                # 2. Make new prediction
                 signal, conf = self.strategy.predict(self.strategy.latest_sentiment)
                 
                 if signal != "HOLD":
-                    # Record this prediction so we can learn from it later
                     features = {'sentiment': self.strategy.latest_sentiment}
+                    
                     self.feedback.record_prediction(features, signal, current_price)
                     
                     await self.execution.execute_order(signal, conf, current_price)
@@ -328,7 +385,11 @@ class RealTimeCore:
             self.queue.task_done()
 
 if __name__ == "__main__":
-    system = RealTimeCore()
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--mode', choices=['replay', 'live'], default='replay', help="Run in 'replay' or 'live' mode")
+    args = parser.parse_args()
+    
+    system = RealTimeCore(mode=args.mode)
     try:
         asyncio.run(system.run())
     except KeyboardInterrupt:

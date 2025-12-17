@@ -30,9 +30,10 @@ We're mashing up two very different types of AI here to create something capable
 
 I know you might just want to see the charts, but for my fellow tech nerds, here’s what we’re running on:
 
-*   **Engine:** Python 3.9 (Classic).
-*   **The Heavy Lifting:** PyTorch & Transformers (for the NLP stuff).
+*   **Engine:** Python 3.11 (Modern).
+*   **The Heavy Lifting:** PyTorch, TensorFlow & Transformers (via `tf-keras` for compatibility).
 *   **Data:** We pull from Yahoo Finance and RSS feeds.
+*   **Architecture:** Asyncio-driven Unified Engine (handling both Live and Replay modes).
 *   **Infrastructure:** It’s all wrapped in Docker containers. This keeps the messy dependencies isolated so they don't fight with the other Python projects on your laptop.
 
 ### Realism Constraints (Because Brokers Aren't Charities)
@@ -40,6 +41,7 @@ I built this simulation to be painful. Why? Because easy backtests are lies.
 
 *   **Slippage & Volatility:** The system simulates the price jumping around by 0.5% to 1.5%. You won't always get the price you clicked.
 *   **Transaction Costs:** It deducts **$2.00 per trade**. That little tax kills bad strategies fast.
+*   **Risk Management:** We don't just "YOLO" into trades. We use a dedicated `RiskManager` that sizes positions based on capital and enforces Stop Losses.
 *   **The Database:** We use SQLite to log everything. It treats every trade like a real transaction.
 
 ## 📊 Deployment Guide
@@ -51,6 +53,10 @@ Ensure you have Docker installed.
 # Clone the repository
 git clone https://github.com/yourusername/quant-desk.git
 cd quant-desk
+
+# Setup Environment
+cp .env.example .env
+# Edit .env to tune your risk parameters
 
 # Start the full stack (Engine + Dashboard)
 docker-compose up --build

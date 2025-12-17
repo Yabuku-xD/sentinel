@@ -51,8 +51,8 @@ Ensure you have Docker installed.
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/quant-desk.git
-cd quant-desk
+git clone https://github.com/yourusername/sentinel.git
+cd sentinel
 
 # Setup Environment
 cp .env.example .env

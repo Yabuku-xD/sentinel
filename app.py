@@ -16,35 +16,35 @@ st.markdown("""
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600&family=JetBrains+Mono:wght@500&display=swap');
 
     .stApp {
-        background-color: #0d1117;
-        color: #c9d1d9;
+        background-color: #222222;
+        color: #FAF3E1;
         font-family: 'Inter', sans-serif;
     }
 
     section[data-testid="stSidebar"] {
-        background-color: #010409;
-        border-right: 1px solid #30363d;
+        background-color: #222222;
+        border-right: 1px solid #F5E7C6;
     }
     
     div[data-testid="stMetric"] {
-        background-color: #161b22;
-        border: 1px solid #30363d;
+        background-color: #222222;
+        border: 1px solid #FF6D1F;
         border-radius: 6px;
         padding: 15px;
         min-height: 120px;
     }
     div[data-testid="stMetricLabel"] {
-        color: #8b949e;
+        color: #F5E7C6;
         font-size: 0.9rem;
     }
     div[data-testid="stMetricValue"] {
-        color: #ffffff;
+        color: #FF6D1F;
         font-family: 'JetBrains Mono', monospace;
         font-size: 1.8rem;
     }
 
     div[data-testid="stDataFrame"] {
-        border: 1px solid #30363d;
+        border: 1px solid #F5E7C6;
         border-radius: 6px;
     }
     
@@ -97,14 +97,14 @@ st.markdown("""
     margin-bottom: 2rem;
 }
 .metric-card {
-    background-color: #161b22;
-    border: 1px solid #30363d;
+    background-color: #222222;
+    border: 1px solid #FF6D1F;
     border-radius: 6px;
     padding: 15px;
-    color: white;
+    color: #FAF3E1;
 }
 .metric-label {
-    color: #8b949e;
+    color: #F5E7C6;
     font-size: 0.9rem;
     margin-bottom: 0.5rem;
 }
@@ -112,6 +112,7 @@ st.markdown("""
     font-family: 'JetBrains Mono', monospace;
     font-size: 1.8rem;
     font-weight: 700;
+    color: #FF6D1F;
 }
 .metric-delta {
     font-size: 0.9rem;
@@ -119,7 +120,7 @@ st.markdown("""
 }
 .delta-pos { color: #3fb950; }
 .delta-neg { color: #f85149; }
-.delta-neutral { color: #8b949e; }
+.delta-neutral { color: #F5E7C6; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -176,11 +177,11 @@ while True:
             y=df['balance'],
             fill='tozeroy',
             mode='lines',
-            line=dict(width=2, color='#58a6ff'),
-            fillcolor='rgba(88, 166, 255, 0.1)',
+            line=dict(width=2, color='#FF6D1F'),
+            fillcolor='rgba(255, 109, 31, 0.1)',
             name='Equity'
         ))
-        fig.add_hline(y=10000, line_dash="dash", line_color="#8b949e", opacity=0.5)
+        fig.add_hline(y=10000, line_dash="dash", line_color="#F5E7C6", opacity=0.5)
 
         fig.update_layout(
             autosize=True,
@@ -188,7 +189,7 @@ while True:
             margin=dict(l=0, r=0, t=20, b=0),
             paper_bgcolor='rgba(0,0,0,0)',
             plot_bgcolor='rgba(0,0,0,0)',
-            font=dict(family='Inter', color='#8b949e'),
+            font=dict(family='Inter', color='#F5E7C6'),
             xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
             yaxis=dict(showgrid=True, gridcolor='#30363d', zeroline=False),
             hovermode="x unified"
@@ -200,7 +201,7 @@ while True:
         def color_pnl(val):
             if val > 0: return 'color: #3fb950; font-weight: 600;' 
             if val < 0: return 'color: #f85149; font-weight: 600;' 
-            return 'color: #8b949e;'
+            return 'color: #F5E7C6;'
 
         styled_df = recent_trades.style.map(color_pnl, subset=['pnl'])\
             .format({'pnl': "${:,.2f}"})

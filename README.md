@@ -1,6 +1,6 @@
 # Sentinel - Algorithmic Trading System (Hybrid AI)
 
-![Sentinel Dashboard](main.png)
+![Sentinel Dashboard](dashboard.png)
 
 See, I’ve been where you are.
 
